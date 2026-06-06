@@ -1,0 +1,4 @@
+# Build scratch only. The compiled artifacts under lib/ and include/ are
+# intentionally tracked — this is a binaries-only distribution repository.
+.tmp/
+.DS_Store
