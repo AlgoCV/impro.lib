@@ -69,8 +69,11 @@ build_target() {
     src_static="$(ls "$tmp"/lib/libimpro.a "$tmp"/lib/impro.lib 2>/dev/null | head -n1)"
     cp -f "$src_static" "$out/libimpro.a"
 
-    # Dynamic bridge library (name differs per OS).
-    cp -f "$tmp/lib/$pylib" "$out/$pylib"
+    # Dynamic bridge library (name differs per OS). Zig installs shared
+    # libraries under lib/ on Unix-likes but DLLs under bin/ on Windows.
+    local src_dyn
+    src_dyn="$(ls "$tmp"/lib/"$pylib" "$tmp"/bin/"$pylib" 2>/dev/null | head -n1)"
+    cp -f "$src_dyn" "$out/$pylib"
 
     # Headers are target-independent; refresh the single shared copy.
     cp -f "$tmp"/include/*.h "$SCRIPT_DIR/include/"
