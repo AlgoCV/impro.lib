@@ -27,6 +27,11 @@ IMPRO_SRC="${IMPRO_SRC:-$SCRIPT_DIR/../impro}"
 ZIG="${ZIG:-zig}"
 OPTIMIZE="${OPTIMIZE:-ReleaseFast}"
 
+if ! command -v "$ZIG" >/dev/null 2>&1; then
+    printf 'error: zig executable ("%s") not found in PATH\n' "$ZIG" >&2
+    exit 1
+fi
+
 if [ ! -f "$IMPRO_SRC/build.zig" ]; then
     printf 'error: IMPRO_SRC (%s) is not an impro source checkout\n' "$IMPRO_SRC" >&2
     exit 1
@@ -59,20 +64,37 @@ build_target() {
         "--prefix" "$tmp"
     )
 
-    # Static C ABI archive + headers.
-    ( cd "$IMPRO_SRC" && "$ZIG" build "${common[@]}" )
-    # Dynamic Python bridge library.
-    ( cd "$IMPRO_SRC" && "$ZIG" build python-libs "${common[@]}" )
+    # Build both the static library (+ headers) and the dynamic Python bridge.
+    # We do this in a single call to avoid prefix cleanup issues between runs.
+    ( cd "$IMPRO_SRC" && "$ZIG" build install python-libs "${common[@]}" )
 
     # Static archive: Windows-gnu emits `impro.lib`; Unix-like emit `libimpro.a`.
-    local src_static
-    src_static="$(ls "$tmp"/lib/libimpro.a "$tmp"/lib/impro.lib 2>/dev/null | head -n1)"
+    local src_static=""
+    if [ -f "$tmp/lib/libimpro.a" ]; then
+        src_static="$tmp/lib/libimpro.a"
+    elif [ -f "$tmp/lib/impro.lib" ]; then
+        src_static="$tmp/lib/impro.lib"
+    fi
+
+    if [ -z "$src_static" ]; then
+        printf 'error: static library not found for %s\n' "$name" >&2
+        exit 1
+    fi
     cp -f "$src_static" "$out/libimpro.a"
 
     # Dynamic bridge library (name differs per OS). Zig installs shared
     # libraries under lib/ on Unix-likes but DLLs under bin/ on Windows.
-    local src_dyn
-    src_dyn="$(ls "$tmp"/lib/"$pylib" "$tmp"/bin/"$pylib" 2>/dev/null | head -n1)"
+    local src_dyn=""
+    if [ -f "$tmp/lib/$pylib" ]; then
+        src_dyn="$tmp/lib/$pylib"
+    elif [ -f "$tmp/bin/$pylib" ]; then
+        src_dyn="$tmp/bin/$pylib"
+    fi
+
+    if [ -z "$src_dyn" ]; then
+        printf 'error: dynamic library (%s) not found for %s\n' "$pylib" "$name" >&2
+        exit 1
+    fi
     cp -f "$src_dyn" "$out/$pylib"
 
     # Headers are target-independent; refresh the single shared copy.
@@ -83,9 +105,30 @@ build_target() {
 }
 
 printf 'Building ImPro desktop binaries from %s\n' "$IMPRO_SRC"
+trap 'rm -rf "$SCRIPT_DIR/.tmp"' EXIT
+
 for entry in "${TARGETS[@]}"; do
+    echo "Building ${entry}"
     IFS='|' read -r name triple cpu pylib <<<"$entry"
     build_target "$name" "$triple" "$cpu" "$pylib"
 done
-rm -rf "$SCRIPT_DIR/.tmp"
+
+# --- macOS Universal Binary ---------------------------------------------------
+# If both macOS targets were built, combine them into a universal binary.
+if [ -f "$SCRIPT_DIR/lib/macos-aarch64/libimpro.a" ] && [ -f "$SCRIPT_DIR/lib/macos-x86_64/libimpro.a" ]; then
+    if command -v lipo >/dev/null 2>&1; then
+        printf 'Creating macos-universal...\n'
+        mkdir -p "$SCRIPT_DIR/lib/macos-universal"
+        lipo -create "$SCRIPT_DIR/lib/macos-aarch64/libimpro.a" \
+                     "$SCRIPT_DIR/lib/macos-x86_64/libimpro.a" \
+             -output "$SCRIPT_DIR/lib/macos-universal/libimpro.a"
+        lipo -create "$SCRIPT_DIR/lib/macos-aarch64/libimpro_python.dylib" \
+                     "$SCRIPT_DIR/lib/macos-x86_64/libimpro_python.dylib" \
+             -output "$SCRIPT_DIR/lib/macos-universal/libimpro_python.dylib"
+        printf '  [OK] %-16s -> lib/%s/{libimpro.a,libimpro_python.dylib}\n' "macos-universal" "macos-universal"
+    else
+        printf '  [..] skipping macos-universal (lipo not found)\n'
+    fi
+fi
+
 printf 'Done. Artifacts under %s/lib and %s/include\n' "$SCRIPT_DIR" "$SCRIPT_DIR"
